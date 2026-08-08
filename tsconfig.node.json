@@ -1,0 +1,24 @@
+{
+  // Used by `tsx` for the processes that run outside Nuxt: the BullMQ worker
+  // (`npm run worker`) and the Prisma seed (`npm run db:seed`). Nuxt's own
+  // generated tsconfigs already know these aliases; tsx does not.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "~~/*": ["./*"],
+      "@@/*": ["./*"],
+      "#shared/*": ["./shared/*"]
+    }
+  },
+  "include": ["server/**/*.ts", "shared/**/*.ts", "prisma/**/*.ts"],
+  "exclude": ["node_modules", "server/generated/**"]
+}

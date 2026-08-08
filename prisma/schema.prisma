@@ -1,0 +1,1021 @@
+// AI Sales Engine — full data model (plan §33).
+// MVP features are implemented against this schema; Phase 2/3 tables exist so
+// later milestones never require a schema rewrite.
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../server/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------- enums
+
+/// Plan §4 — explicit pipeline stages plus the off-pipeline states.
+enum LeadStage {
+  PROSPECT
+  RESEARCHING
+  QUALIFIED
+  READY_FOR_OUTREACH
+  CONTACTED
+  RESPONDED
+  DISCOVERY
+  OPPORTUNITY
+  PROPOSAL_SENT
+  NEGOTIATION
+  WON
+  LOST
+  CUSTOMER
+  REFERRAL
+  UPSELL
+  NOT_A_FIT
+  DO_NOT_CONTACT
+  COLD
+  FOLLOW_UP_LATER
+}
+
+/// Plan §9 — AI must never present an inference as a confirmed fact.
+enum ClaimType {
+  FACT
+  INFERENCE
+  UNKNOWN
+}
+
+/// Plan §14 — decision roles.
+enum DecisionRole {
+  CHAMPION
+  DECISION_MAKER
+  TECHNICAL_EVALUATOR
+  INFLUENCER
+  UNKNOWN
+}
+
+/// Plan §38 — human approval modes, configured per automation type.
+enum ApprovalMode {
+  MANUAL
+  AI_DRAFT
+  AI_REVIEW_REQUIRED
+  AUTO_APPROVED
+  DISABLED
+}
+
+/// Plan §4 — every stage change records whether AI or a human initiated it.
+enum ActorType {
+  HUMAN
+  AI
+  SYSTEM
+}
+
+enum ResearchStatus {
+  PENDING
+  RUNNING
+  COMPLETE
+  FAILED
+}
+
+enum OutreachStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  SCHEDULED
+  SENT
+  FAILED
+  BOUNCED
+}
+
+enum MessageDirection {
+  OUTBOUND
+  INBOUND
+}
+
+enum SuppressionReason {
+  UNSUBSCRIBED
+  BOUNCED
+  COMPLAINT
+  DO_NOT_CONTACT
+  MANUAL
+}
+
+enum TaskStatus {
+  OPEN
+  DONE
+  CANCELLED
+}
+
+enum GoalPeriod {
+  DAILY
+  WEEKLY
+  MONTHLY
+  QUARTERLY
+}
+
+/// Countable events a goal can target (plan §6).
+enum GoalMetric {
+  COMPANIES_RESEARCHED
+  CONTACTS_IDENTIFIED
+  OUTREACH_SENT
+  FOLLOW_UPS_SENT
+  REPLIES
+  CONVERSATIONS
+  DISCOVERY_CALLS
+  PROPOSALS
+  DEALS_WON
+}
+
+enum AiRunStatus {
+  PENDING
+  RUNNING
+  SUCCESS
+  FAILED
+}
+
+enum ReplyIntent {
+  INTERESTED
+  NEEDS_INFO
+  NOT_INTERESTED
+  NOT_NOW
+  REFERRED_TO_OTHER
+  OUT_OF_OFFICE
+  UNSUBSCRIBE
+  AUTO_REPLY
+  QUESTION
+  OTHER
+}
+
+enum LeadSourceType {
+  MANUAL
+  CSV
+  WEBSITE_FORM
+  REFERRAL
+  SEARCH_PROVIDER
+  DIRECTORY
+  JOB_POSTING
+  CONFERENCE
+  EXISTING_CONTACT
+}
+
+// ---------------------------------------------------------------- core
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  name         String
+  passwordHash String
+  role         String    @default("owner")
+  timezone     String    @default("UTC")
+  /// Preferred outreach tone, fed to the OutreachAgent (plan §15).
+  tone         String    @default("direct, plain, no hype")
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+
+  companies      Company[]
+  contacts       Contact[]
+  leads          Lead[]
+  icps           Icp[]
+  activities     Activity[]
+  tasks          Task[]
+  goals          Goal[]
+  aiRuns         AiRun[]
+  auditLogs      AuditLog[]
+  integrations   Integration[]
+  caseStudies    CaseStudy[]
+  automationPrefs AutomationSetting[]
+  settings       ComplianceSetting?
+
+  @@map("users")
+}
+
+model Company {
+  id             String    @id @default(cuid())
+  userId         String
+  name           String
+  domain         String?
+  website        String?
+  industry       String?
+  location       String?
+  employeeCount  Int?
+  sizeLabel      String?
+  description    String?
+  linkedinUrl    String?
+  phone          String?
+  /// Free-form structured signals captured outside the research pipeline.
+  metadata       Json?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  contacts         Contact[]
+  leads            Lead[]
+  researchReports  ResearchReport[]
+  researchSources  ResearchSource[]
+  opportunities    Opportunity[]
+  activities       Activity[]
+  meetings         Meeting[]
+  proposals        Proposal[]
+  testimonials     Testimonial[]
+  referralsFrom    Referral[]        @relation("ReferralSource")
+  referralsTo      Referral[]        @relation("ReferralTarget")
+
+  @@unique([userId, domain])
+  @@index([userId, name])
+  @@map("companies")
+}
+
+model Contact {
+  id                 String        @id @default(cuid())
+  userId             String
+  companyId          String?
+  firstName          String
+  lastName           String?
+  title              String?
+  email              String?
+  phone              String?
+  linkedinUrl        String?
+  decisionRole       DecisionRole  @default(UNKNOWN)
+  /// 0-100 — how much sway this person has over the buying decision.
+  influenceScore     Int           @default(0)
+  relationshipStatus String        @default("NEW")
+  lastInteractionAt  DateTime?
+  notes              String?
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+  deletedAt          DateTime?
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company       Company?       @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  leads         Lead[]
+  emailThreads  EmailThread[]
+  activities    Activity[]
+  meetings      Meeting[]
+  tasks         Task[]
+  outreach      OutreachDraft[]
+  referrals     Referral[]
+
+  @@index([userId, companyId])
+  @@index([userId, email])
+  @@map("contacts")
+}
+
+// ---------------------------------------------------------------- ICP
+
+model Icp {
+  id          String    @id @default(cuid())
+  userId      String
+  name        String
+  description String?
+  industries  String[]
+  minEmployees Int?
+  maxEmployees Int?
+  geographies String[]
+  /// Operational problems this ICP is defined around (plan §7).
+  problems    String[]
+  targetRoles String[]
+  minDealSize Int?
+  maxDealSize Int?
+  isDefault   Boolean   @default(false)
+  /// Scoring weights, e.g. {"industry":25,"size":20,...}. Users may retune (plan §12).
+  weights     Json?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  user  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rules IcpRule[]
+  leads Lead[]
+
+  @@index([userId])
+  @@map("icps")
+}
+
+model IcpRule {
+  id        String   @id @default(cuid())
+  icpId     String
+  field     String
+  operator  String
+  value     String
+  weight    Int      @default(10)
+  createdAt DateTime @default(now())
+
+  icp Icp @relation(fields: [icpId], references: [id], onDelete: Cascade)
+
+  @@index([icpId])
+  @@map("icp_rules")
+}
+
+// ---------------------------------------------------------------- leads
+
+model Lead {
+  id             String         @id @default(cuid())
+  userId         String
+  companyId      String
+  contactId      String?
+  icpId          String?
+  stage          LeadStage      @default(PROSPECT)
+  sourceType     LeadSourceType @default(MANUAL)
+  sourceDetail   String?
+  estimatedValueMin Int?
+  estimatedValueMax Int?
+  /// Denormalised from the newest LeadScore row so list views stay one query.
+  fitScore       Int?
+  opportunityScore Int?
+  overallScore   Int?
+  nextAction     String?
+  nextActionDueAt DateTime?
+  lastContactedAt DateTime?
+  lastActivityAt  DateTime?
+  wonAt          DateTime?
+  lostAt         DateTime?
+  lostReason     String?
+  /// Website-form attribution (plan §62).
+  utmSource      String?
+  utmMedium      String?
+  utmCampaign    String?
+  referrer       String?
+  landingPage    String?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  deletedAt      DateTime?
+
+  user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company         Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  contact         Contact?           @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  icp             Icp?               @relation(fields: [icpId], references: [id], onDelete: SetNull)
+  scores          LeadScore[]
+  stageHistory    LeadStageHistory[]
+  researchReports ResearchReport[]
+  opportunities   Opportunity[]
+  activities      Activity[]
+  tasks           Task[]
+  emailThreads    EmailThread[]
+  outreachDrafts  OutreachDraft[]
+  meetings        Meeting[]
+  proposals       Proposal[]
+  sequenceEnrollments SequenceEnrollment[]
+  discoveryQuestions  DiscoveryQuestion[]
+  aiRuns          AiRun[]
+
+  @@index([userId, stage])
+  @@index([userId, overallScore])
+  @@index([userId, nextActionDueAt])
+  @@map("leads")
+}
+
+model LeadScore {
+  id               String   @id @default(cuid())
+  leadId           String
+  fitScore         Int
+  opportunityScore Int
+  overallScore     Int
+  /// Per-factor contributions so the UI can explain the number.
+  fitBreakdown         Json?
+  opportunityBreakdown Json?
+  rationale        String?
+  createdAt        DateTime @default(now())
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId, createdAt])
+  @@map("lead_scores")
+}
+
+model LeadStageHistory {
+  id            String    @id @default(cuid())
+  leadId        String
+  previousStage LeadStage?
+  newStage      LeadStage
+  reason        String?
+  actorType     ActorType @default(HUMAN)
+  actorId       String?
+  createdAt     DateTime  @default(now())
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId, createdAt])
+  @@map("lead_stage_history")
+}
+
+// ---------------------------------------------------------------- research
+
+model ResearchReport {
+  id             String         @id @default(cuid())
+  leadId         String
+  companyId      String
+  status         ResearchStatus @default(PENDING)
+  /// Structured agent output (plan §31) — never rely on raw text alone.
+  summary        String?
+  payload        Json?
+  confidence     Float?
+  model          String?
+  error          String?
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  lead    Lead             @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  company Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  claims  ResearchClaim[]
+  sources ResearchSource[]
+
+  @@index([leadId, createdAt])
+  @@map("research_reports")
+}
+
+model ResearchSource {
+  id          String    @id @default(cuid())
+  companyId   String
+  reportId    String?
+  kind        String
+  url         String?
+  title       String?
+  /// Sanitised page text. Treated strictly as data, never as instructions (plan §36).
+  snippet     String?
+  retrievedAt DateTime  @default(now())
+  createdAt   DateTime  @default(now())
+
+  company Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  report  ResearchReport? @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  claims  ResearchClaim[]
+
+  @@index([companyId])
+  @@map("research_sources")
+}
+
+model ResearchClaim {
+  id         String    @id @default(cuid())
+  reportId   String
+  sourceId   String?
+  type       ClaimType
+  category   String?
+  text       String
+  confidence Float     @default(0.5)
+  createdAt  DateTime  @default(now())
+
+  report ResearchReport  @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  source ResearchSource? @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+
+  @@index([reportId, type])
+  @@map("research_claims")
+}
+
+model Opportunity {
+  id             String   @id @default(cuid())
+  leadId         String
+  companyId      String
+  title          String
+  problem        String
+  solution       String
+  benefit        String?
+  confidence     Float    @default(0.5)
+  /// Claim ids / source urls backing this opportunity (plan §11).
+  evidence       Json?
+  estimatedValueMin Int?
+  estimatedValueMax Int?
+  status         String   @default("OPEN")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  lead    Lead    @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  roi     RoiEstimate?
+
+  @@index([leadId])
+  @@map("opportunities")
+}
+
+/// Plan §25 — prospect-supplied numbers preferred over AI estimates.
+model RoiEstimate {
+  id                String   @id @default(cuid())
+  opportunityId     String   @unique
+  employees         Int
+  hoursPerWeek      Float
+  hourlyCost        Float
+  projectCost       Int?
+  /// True when the inputs came from the prospect rather than an AI guess.
+  prospectSupplied  Boolean  @default(false)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  opportunity Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+
+  @@map("roi_estimates")
+}
+
+// ---------------------------------------------------------------- activity
+
+model Activity {
+  id        String    @id @default(cuid())
+  userId    String
+  leadId    String?
+  companyId String?
+  contactId String?
+  type      String
+  summary   String
+  detail    String?
+  actorType ActorType @default(HUMAN)
+  metadata  Json?
+  occurredAt DateTime @default(now())
+  createdAt DateTime  @default(now())
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lead    Lead?    @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  company Company? @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  contact Contact? @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@index([userId, occurredAt])
+  @@index([leadId, occurredAt])
+  @@map("activities")
+}
+
+model Task {
+  id          String     @id @default(cuid())
+  userId      String
+  leadId      String?
+  contactId   String?
+  title       String
+  detail      String?
+  dueAt       DateTime?
+  status      TaskStatus @default(OPEN)
+  createdByAi Boolean    @default(false)
+  completedAt DateTime?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lead    Lead?    @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  contact Contact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
+
+  @@index([userId, status, dueAt])
+  @@map("tasks")
+}
+
+// ---------------------------------------------------------------- outreach
+
+model OutreachDraft {
+  id           String         @id @default(cuid())
+  leadId       String
+  contactId    String?
+  /// Set on reply drafts so approval answers the thread it was written for,
+  /// rather than guessing when a lead has two conversations in flight.
+  threadId     String?
+  channel      String         @default("EMAIL")
+  variant      String         @default("INITIAL")
+  subject      String?
+  body         String
+  status       OutreachStatus @default(PENDING_APPROVAL)
+  /// Why the AI proposed this lead now — shown in the approval queue (plan §16).
+  reason       String?
+  regenerationOf String?
+  regenerationHint String?
+  approvedAt   DateTime?
+  rejectedAt   DateTime?
+  rejectionReason String?
+  sentAt       DateTime?
+  messageId    String?
+  aiRunId      String?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  lead    Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  contact Contact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
+
+  @@index([leadId, status])
+  @@map("outreach_drafts")
+}
+
+model EmailThread {
+  id            String   @id @default(cuid())
+  leadId        String?
+  contactId     String?
+  providerThreadId String?
+  subject       String
+  lastMessageAt DateTime @default(now())
+  isClosed      Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  lead     Lead?          @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  contact  Contact?       @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  messages EmailMessage[]
+
+  @@unique([providerThreadId])
+  @@index([leadId, lastMessageAt])
+  @@map("email_threads")
+}
+
+model EmailMessage {
+  id               String           @id @default(cuid())
+  threadId         String
+  direction        MessageDirection
+  providerMessageId String?
+  fromEmail        String
+  toEmail          String
+  subject          String?
+  body             String
+  snippet          String?
+  sentAt           DateTime         @default(now())
+  bounced          Boolean          @default(false)
+  /// Reply-intelligence output (plan §18), persisted structurally.
+  intent           ReplyIntent?
+  sentiment        String?
+  aiSummary        String?
+  questions        String[]
+  objections       String[]
+  recommendedAction String?
+  /// Remainder of the reply agent's structured output — buying signals,
+  /// objection playbook keys, pause recommendation, confidence.
+  replyPayload     Json?
+  createdAt        DateTime         @default(now())
+
+  thread EmailThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  @@unique([providerMessageId])
+  @@index([threadId, sentAt])
+  @@map("email_messages")
+}
+
+model EmailSequence {
+  id          String   @id @default(cuid())
+  userId      String
+  name        String
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  steps       SequenceStep[]
+  enrollments SequenceEnrollment[]
+
+  @@index([userId])
+  @@map("email_sequences")
+}
+
+model SequenceStep {
+  id         String   @id @default(cuid())
+  sequenceId String
+  dayOffset  Int
+  channel    String   @default("EMAIL")
+  purpose    String
+  template   String?
+  createdAt  DateTime @default(now())
+
+  sequence EmailSequence @relation(fields: [sequenceId], references: [id], onDelete: Cascade)
+
+  @@index([sequenceId, dayOffset])
+  @@map("sequence_steps")
+}
+
+model SequenceEnrollment {
+  id          String    @id @default(cuid())
+  sequenceId  String
+  leadId      String
+  currentStep Int       @default(0)
+  status      String    @default("ACTIVE")
+  pausedReason String?
+  pausedAt    DateTime?
+  nextRunAt   DateTime?
+  /// Day offsets are measured from here. Re-enrolling resets it, so a second
+  /// enrolment is not scheduled against the first one's start date.
+  enrolledAt  DateTime  @default(now())
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  sequence EmailSequence @relation(fields: [sequenceId], references: [id], onDelete: Cascade)
+  lead     Lead          @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@unique([sequenceId, leadId])
+  @@map("sequence_enrollments")
+}
+
+/// Plan §17/§37 — nobody on this list is ever contacted again.
+model SuppressionEntry {
+  id        String            @id @default(cuid())
+  email     String            @unique
+  reason    SuppressionReason
+  detail    String?
+  createdAt DateTime          @default(now())
+
+  @@map("suppression_list")
+}
+
+// ---------------------------------------------------------------- meetings
+
+model Meeting {
+  id          String    @id @default(cuid())
+  leadId      String?
+  companyId   String?
+  contactId   String?
+  title       String
+  scheduledAt DateTime
+  durationMin Int       @default(30)
+  location    String?
+  /// Pre-call brief produced by the DiscoveryAgent (plan §19).
+  brief       Json?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  lead      Lead?            @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  company   Company?         @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  contact   Contact?         @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  notes     MeetingNote[]
+  summaries MeetingSummary[]
+
+  @@index([leadId, scheduledAt])
+  @@map("meetings")
+}
+
+model MeetingNote {
+  id        String   @id @default(cuid())
+  meetingId String
+  kind      String   @default("NOTE")
+  content   String
+  createdAt DateTime @default(now())
+
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@index([meetingId])
+  @@map("meeting_notes")
+}
+
+model MeetingSummary {
+  id        String   @id @default(cuid())
+  meetingId String
+  summary   String
+  /// Pain points, budget signals, objections, next actions… (plan §20).
+  payload   Json?
+  createdAt DateTime @default(now())
+
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@index([meetingId])
+  @@map("meeting_summaries")
+}
+
+model DiscoveryQuestion {
+  id        String   @id @default(cuid())
+  leadId    String
+  category  String
+  question  String
+  rationale String?
+  asked     Boolean  @default(false)
+  answer    String?
+  createdAt DateTime @default(now())
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId, category])
+  @@map("discovery_questions")
+}
+
+// ---------------------------------------------------------------- deals
+
+model Proposal {
+  id         String   @id @default(cuid())
+  leadId     String
+  companyId  String
+  title      String
+  status     String   @default("DRAFT")
+  sentAt     DateTime?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  lead     Lead              @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  company  Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  versions ProposalVersion[]
+
+  @@index([leadId])
+  @@map("proposals")
+}
+
+model ProposalVersion {
+  id         String   @id @default(cuid())
+  proposalId String
+  version    Int
+  /// Section map keyed by plan §24 headings.
+  sections   Json
+  investmentMin Int?
+  investmentMax Int?
+  createdAt  DateTime @default(now())
+
+  proposal Proposal @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+
+  @@unique([proposalId, version])
+  @@map("proposal_versions")
+}
+
+model CaseStudy {
+  id             String   @id @default(cuid())
+  userId         String
+  slug           String   @unique
+  title          String
+  industry       String
+  problem        String
+  solution       String
+  technologies   String[]
+  businessResult String
+  clientQuote    String?
+  publicUse      Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, industry])
+  @@map("case_studies")
+}
+
+model Testimonial {
+  id         String   @id @default(cuid())
+  companyId  String
+  quote      String
+  author     String
+  authorRole String?
+  publicUse  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@map("testimonials")
+}
+
+model Referral {
+  id              String   @id @default(cuid())
+  sourceCompanyId String
+  sourceContactId String?
+  targetCompanyId String?
+  targetName      String?
+  status          String   @default("REQUESTED")
+  notes           String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  sourceCompany Company  @relation("ReferralSource", fields: [sourceCompanyId], references: [id], onDelete: Cascade)
+  sourceContact Contact? @relation(fields: [sourceContactId], references: [id], onDelete: SetNull)
+  targetCompany Company? @relation("ReferralTarget", fields: [targetCompanyId], references: [id], onDelete: SetNull)
+
+  @@map("referrals")
+}
+
+// ---------------------------------------------------------------- goals
+
+model Goal {
+  id        String     @id @default(cuid())
+  userId    String
+  metric    GoalMetric
+  period    GoalPeriod @default(WEEKLY)
+  target    Int
+  isActive  Boolean    @default(true)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  user     User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  progress GoalProgress[]
+
+  @@unique([userId, metric, period])
+  @@map("goals")
+}
+
+model GoalProgress {
+  id          String   @id @default(cuid())
+  goalId      String
+  periodStart DateTime
+  periodEnd   DateTime
+  value       Int      @default(0)
+  computedAt  DateTime @default(now())
+
+  goal Goal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+
+  @@unique([goalId, periodStart])
+  @@map("goal_progress")
+}
+
+// ---------------------------------------------------------------- AI
+
+model AiRun {
+  id         String      @id @default(cuid())
+  userId     String
+  leadId     String?
+  agent      String
+  status     AiRunStatus @default(PENDING)
+  provider   String
+  model      String?
+  /// Sanitised input actually handed to the model.
+  input      Json?
+  output     Json?
+  rawText    String?
+  error      String?
+  promptTokens     Int?
+  completionTokens Int?
+  latencyMs  Int?
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  user     User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lead     Lead?       @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  feedback AiFeedback[]
+
+  @@index([userId, agent, createdAt])
+  @@map("ai_runs")
+}
+
+model AiFeedback {
+  id        String   @id @default(cuid())
+  aiRunId   String
+  rating    Int
+  comment   String?
+  createdAt DateTime @default(now())
+
+  aiRun AiRun @relation(fields: [aiRunId], references: [id], onDelete: Cascade)
+
+  @@index([aiRunId])
+  @@map("ai_feedback")
+}
+
+/// Plan §38 — approval mode per automation type.
+model AutomationSetting {
+  id        String       @id @default(cuid())
+  userId    String
+  key       String
+  mode      ApprovalMode @default(AI_REVIEW_REQUIRED)
+  updatedAt DateTime     @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, key])
+  @@map("automation_settings")
+}
+
+/// Plan §37 — sender identity and send limits used by the email provider.
+model ComplianceSetting {
+  id                String   @id @default(cuid())
+  userId            String   @unique
+  senderName        String   @default("")
+  senderEmail       String   @default("")
+  physicalAddress   String   @default("")
+  unsubscribeText   String   @default("Reply STOP and I won't contact you again.")
+  dailySendLimit    Int      @default(50)
+  updatedAt         DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("compliance_settings")
+}
+
+// ---------------------------------------------------------------- integrations
+
+model Integration {
+  id        String    @id @default(cuid())
+  userId    String
+  kind      String
+  provider  String
+  isEnabled Boolean   @default(false)
+  config    Json?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  user        User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  credentials IntegrationCredential[]
+
+  @@unique([userId, kind, provider])
+  @@map("integrations")
+}
+
+model IntegrationCredential {
+  id            String    @id @default(cuid())
+  integrationId String
+  /// AES-256-GCM ciphertext. Plaintext secrets never touch the database (plan §36).
+  ciphertext    String
+  iv            String
+  authTag       String
+  expiresAt     DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  integration Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+
+  @@index([integrationId])
+  @@map("integration_credentials")
+}
+
+model AuditLog {
+  id         String    @id @default(cuid())
+  userId     String?
+  actorType  ActorType @default(HUMAN)
+  action     String
+  entityType String
+  entityId   String?
+  metadata   Json?
+  ipAddress  String?
+  createdAt  DateTime  @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([entityType, entityId])
+  @@map("audit_logs")
+}

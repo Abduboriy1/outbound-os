@@ -1,0 +1,93 @@
+/*
+ * Ported verbatim from the Next app's `src/app/globals.css`. Two additions,
+ * both marked below:
+ *   1. the `@layer` declaration PrimeVue needs so Tailwind utilities win, and
+ *   2. concrete values for --font-geist-sans / --font-geist-mono, which
+ *      `next/font` used to inject and Nuxt does not.
+ */
+
+/* PrimeVue's stylesheet is emitted into the `primeui` layer (see nuxt.config);
+ * declaring the order here is what lets a Tailwind utility class on a PrimeVue
+ * component override the component's own rule. */
+@layer theme, base, primeui, components, utilities;
+
+@import "tailwindcss";
+@import "tailwindcss-primeui";
+
+/*
+ * Design tokens for the sales engine. This is an operator tool used for hours
+ * at a time: dense, high-contrast, quiet colour reserved for status meaning.
+ */
+:root {
+  --background: #f7f8fa;
+  --surface: #ffffff;
+  --surface-muted: #f2f4f7;
+  --border: #e3e6ec;
+  --foreground: #14181f;
+  --muted: #5c6675;
+  --accent: #2f6df6;
+  --accent-soft: #e8effe;
+  --positive: #167c50;
+  --positive-soft: #e3f5ec;
+  --warning: #9a6200;
+  --warning-soft: #fdf1dc;
+  --danger: #b3261e;
+  --danger-soft: #fdeceb;
+
+  /* Supplied by `next/font` in the React app; hard-coded here. */
+  --font-geist-sans: "Geist", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-geist-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0d1015;
+    --surface: #151a21;
+    --surface-muted: #1b212a;
+    --border: #262e3a;
+    --foreground: #e7ebf1;
+    --muted: #97a1b0;
+    --accent: #6c9bff;
+    --accent-soft: #1a2740;
+    --positive: #58c38e;
+    --positive-soft: #14281f;
+    --warning: #e0a44a;
+    --warning-soft: #2a2114;
+    --danger: #f2837b;
+    --danger-soft: #2c1817;
+  }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-border: var(--border);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-positive: var(--positive);
+  --color-positive-soft: var(--positive-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans), system-ui, sans-serif;
+}
+
+/* Tailwind v4 resets border colour to currentColor; restore a sane default. */
+@layer base {
+  *,
+  ::after,
+  ::before {
+    border-color: var(--border);
+  }
+}
