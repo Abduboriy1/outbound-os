@@ -23,6 +23,9 @@ import type {
   AiProvider,
   AiRequest,
   AiResponse,
+  GroundedRequest,
+  GroundedResponse,
+  GroundedSearchProvider,
   UntrustedDocument,
 } from "~~/server/lib/contracts";
 import { readContext } from "../prompt";
@@ -58,7 +61,17 @@ export function registerMockAgent(agent: AgentName, generator: MockGenerator) {
   generators.set(agent, generator);
 }
 
-export class MockAiProvider implements AiProvider {
+/** Sample companies the mock lead finder "discovers". Fictional by construction. */
+const SAMPLE_PROSPECTS = [
+  { name: "Northgate Freight", domain: "northgate-freight.example", industry: "Logistics", location: "Leeds" },
+  { name: "Pennine Components", domain: "pennine-components.example", industry: "Manufacturing", location: "Sheffield" },
+  { name: "Calder Facilities Group", domain: "calder-facilities.example", industry: "Facilities management", location: "Halifax" },
+  { name: "Aire Valley Wholesale", domain: "airevalley-wholesale.example", industry: "Wholesale", location: "Bradford" },
+  { name: "Ryedale Care Services", domain: "ryedale-care.example", industry: "Healthcare services", location: "York" },
+  { name: "Tyne Plant Hire", domain: "tyne-plant-hire.example", industry: "Equipment hire", location: "Newcastle" },
+];
+
+export class MockAiProvider implements AiProvider, GroundedSearchProvider {
   readonly name = MOCK_PROVIDER;
   readonly model = MOCK_MODEL;
 
@@ -97,6 +110,45 @@ export class MockAiProvider implements AiProvider {
       provider: this.name,
       promptTokens: estimateTokens(request.system) + estimateTokens(request.instruction),
       completionTokens: estimateTokens(rawText),
+      latencyMs: Date.now() - startedAt,
+    };
+  }
+
+  /**
+   * Offline lead discovery. Returns a fixed set of invented companies on the
+   * `.example` TLD, which RFC 2606 reserves precisely so it can never resolve
+   * to anything real, and labels every line as sample data. Someone demoing the
+   * finder has to be able to see the whole flow; nobody must be able to mistake
+   * these for companies worth emailing.
+   */
+  async searchGrounded(request: GroundedRequest): Promise<GroundedResponse> {
+    const startedAt = Date.now();
+    const seed = hash(request.instruction);
+    const chosen = SAMPLE_PROSPECTS.slice(0, 3 + (seed % (SAMPLE_PROSPECTS.length - 2)));
+
+    const text = [
+      "[SAMPLE DATA] Generated locally by the mock AI provider. No search was performed",
+      "and none of these companies exist. Set AI_PROVIDER=gemini to search for real ones.",
+      "",
+      ...chosen.map(
+        (company) =>
+          `- ${company.name} (${company.domain}) — ${company.industry}, ${company.location}. ` +
+          "Sample text: the operations team still consolidates its weekly reporting by hand.",
+      ),
+    ].join("\n");
+
+    return {
+      text,
+      citations: chosen.map((company) => ({
+        url: `https://${company.domain}/about`,
+        title: company.domain,
+        domain: company.domain,
+      })),
+      queries: ["[sample] no search was performed"],
+      model: this.model,
+      provider: this.name,
+      promptTokens: estimateTokens(request.system) + estimateTokens(request.instruction),
+      completionTokens: estimateTokens(text),
       latencyMs: Date.now() - startedAt,
     };
   }
@@ -543,11 +595,37 @@ function mockSalesCoach(input: MockInput) {
 
 const BUILT_IN: Partial<Record<AgentName, MockGenerator>> = {
   research: mockResearch,
+  searchplan: mockSearchPlan,
   qualification: mockQualification,
   opportunity: mockOpportunity,
   discovery: mockDiscovery,
   salesCoach: mockSalesCoach,
 };
+
+/** The searches a person would type; keeps mock runs' activity logs readable. */
+function mockSearchPlan(input: MockInput) {
+  const company = record(input.context.company);
+  const domain = (company.domain as string | undefined) ?? "";
+  return {
+    queries: [
+      {
+        query: `${input.companyName} leadership team`,
+        goal: "people",
+        reason: "The team or leadership page names decision makers.",
+      },
+      {
+        query: `${input.companyName} ${domain} contact email`,
+        goal: "people",
+        reason: "Contact pages and directories list addresses and phone numbers.",
+      },
+      {
+        query: `${input.companyName} news`,
+        goal: "company",
+        reason: "Recent coverage surfaces growth and operational pain.",
+      },
+    ],
+  };
+}
 
 /* ------------------------------------------------- schema-driven fallback */
 
@@ -667,6 +745,7 @@ function readDecisionMakers(context: Record<string, unknown>) {
       name: `${contact.firstName} ${contact.lastName ?? ""}`.trim(),
       title: (contact.title as string) ?? null,
       role: "UNKNOWN" as const,
+      email: (contact.email as string | undefined) ?? null,
       source_url: null,
     },
   ];

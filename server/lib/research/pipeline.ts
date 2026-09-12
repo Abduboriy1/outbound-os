@@ -31,8 +31,14 @@ import {
   type Opportunity,
 } from "~~/server/lib/ai/agents/opportunity";
 import { scoreLeadById } from "~~/server/lib/scoring/persist";
-import { getSearchProvider } from "./search";
-import { SAMPLE_PATHS } from "./search/mock";
+import { gatherSources } from "./crawl";
+import { createProgressLog } from "./progress";
+import {
+  harvestEmails,
+  harvestPhones,
+  mergeDiscoveredPeople,
+  syncDiscoveredPeople,
+} from "./people";
 import {
   aiSignal,
   detectSignals,
@@ -42,10 +48,6 @@ import {
 } from "./signals";
 import { RESEARCH_PAYLOAD_VERSION, type ResearchPayload } from "./types";
 
-/** Paths tried on a company's own website. Real, attributable sources. */
-const SITE_PATHS = ["/", "/about", "/about-us", "/services", "/careers", "/jobs", "/news"];
-
-const MAX_SOURCES = 8;
 const MAX_SOURCE_CHARS = 12_000;
 
 export type RunResearchOptions = {
@@ -106,9 +108,11 @@ export async function runResearch(options: RunResearchOptions): Promise<RunResea
       })
     ).id;
 
+  // A re-run's log describes the new run; `progress: []` drops the old one
+  // along with the evidence rows below.
   await prisma.researchReport.update({
     where: { id: reportId },
-    data: { status: "RUNNING", startedAt: new Date(), error: null },
+    data: { status: "RUNNING", startedAt: new Date(), error: null, progress: [] },
   });
 
   // A re-run replaces its own evidence rather than appending to it.
@@ -116,14 +120,51 @@ export async function runResearch(options: RunResearchOptions): Promise<RunResea
   await prisma.researchSource.deleteMany({ where: { reportId } });
 
   const warnings: string[] = [];
+  const progress = createProgressLog(reportId);
 
   try {
     await moveToResearching(lead.id, lead.stage, options.actorType ?? "SYSTEM", options.userId);
 
     /* ---------------------------------------------- 1. gather public sources */
-    const fetched = await gatherSources(lead.company, warnings);
+    await progress.start(
+      "company",
+      "sources",
+      `Fetching public pages for ${lead.company.name}`,
+    );
+    // The crawl reports every page read, link followed and search run into the
+    // step log, so the whole hunt is auditable afterwards.
+    const fetched = await gatherSources({
+      company: {
+        name: lead.company.name,
+        domain: lead.company.domain,
+        website: lead.company.website,
+      },
+      userId: options.userId,
+      leadId: lead.id,
+      warnings,
+      emit: async (event) => {
+        if (event.status === "started") {
+          await progress.start(event.section, event.stage, event.label);
+        } else if (event.status === "done") {
+          await progress.done(event.section, event.stage, event.label, event.detail);
+        } else {
+          await progress.warn(event.section, event.stage, event.label, event.detail);
+        }
+      },
+    });
     if (fetched.length === 0) {
       warnings.push("No public sources could be retrieved for this company.");
+      await progress.warn("company", "sources", "No public pages could be retrieved");
+    } else {
+      await progress.done(
+        "company",
+        "sources",
+        `Retrieved ${fetched.length} page${fetched.length === 1 ? "" : "s"}`,
+        fetched
+          .map((page) => page.title ?? page.url ?? page.kind)
+          .slice(0, 6)
+          .join(" · "),
+      );
     }
 
     const sources = await Promise.all(
@@ -150,6 +191,11 @@ export async function runResearch(options: RunResearchOptions): Promise<RunResea
     }));
 
     /* -------------------------------------------------- 2. AI analysis (§9) */
+    await progress.start(
+      "company",
+      "analysis",
+      "Reading the sources and building the intelligence report",
+    );
     const research = await aiService().run({
       agent: "research",
       userId: options.userId,
@@ -185,6 +231,13 @@ export async function runResearch(options: RunResearchOptions): Promise<RunResea
         `${research.injectionFindings.length} instruction-shaped fragment(s) were removed from the retrieved pages before analysis.`,
       );
     }
+
+    await progress.done(
+      "company",
+      "analysis",
+      `Analysed ${sources.length} source${sources.length === 1 ? "" : "s"} with ${research.model}`,
+      `${report.claims.length} claims · ${report.pain_signals.length} pain signals · confidence ${Math.round(report.research_confidence * 100)}%`,
+    );
 
     /* ------------------------------------------------- 3. persist the claims */
     const urlToSourceId = new Map(
@@ -226,6 +279,93 @@ export async function runResearch(options: RunResearchOptions): Promise<RunResea
       .filter((s): s is DetectedSignal => Boolean(s));
 
     const signals = mergeSignals(ruleSignals, aiSignals);
+    await progress.done(
+      "company",
+      "signals",
+      `Detected ${signals.length} signal${signals.length === 1 ? "" : "s"}`,
+      signals
+        .slice(0, 5)
+        .map((signal) => signal.label)
+        .join(" · ") || undefined,
+    );
+
+    /* --------------------------- 4b. people discovery → contacts (People tab) */
+    let peopleSummary: NonNullable<ResearchPayload["people"]> = {
+      found: 0,
+      created: [],
+      enriched: [],
+    };
+    try {
+      await progress.start("people", "extract", "Looking for people and email addresses");
+      const pageText = fetched.map((page) => ({ url: page.url ?? null, text: page.text }));
+      const harvested = harvestEmails(pageText);
+      const phones = harvestPhones(pageText);
+      const people = mergeDiscoveredPeople(report.decision_makers, harvested);
+      peopleSummary.phones = phones;
+      await progress.done(
+        "people",
+        "extract",
+        `Found ${people.length} ${people.length === 1 ? "person" : "people"}, ${harvested.length} email${harvested.length === 1 ? "" : "s"}, ${phones.length} phone/fax number${phones.length === 1 ? "" : "s"}`,
+        [
+          people
+            .map((p) => p.name ?? p.email)
+            .filter(Boolean)
+            .slice(0, 6)
+            .join(" · "),
+          phones.map((p) => `${p.kind === "fax" ? "fax " : ""}${p.number}`).slice(0, 4).join(" · "),
+        ]
+          .filter(Boolean)
+          .join(" — ") || undefined,
+      );
+
+      // The company's main line lands on the company record when it has none.
+      const mainPhone = phones.find((p) => p.kind === "phone");
+      if (mainPhone && !lead.company.phone) {
+        await prisma.company.update({
+          where: { id: lead.companyId },
+          data: { phone: mainPhone.number },
+        });
+        await progress.done(
+          "people",
+          "company-phone",
+          `Saved ${mainPhone.number} as the company phone number`,
+          mainPhone.sourceUrl ?? undefined,
+        );
+      }
+
+      if (people.length) {
+        await progress.start("people", "contacts", "Saving new people to the lead");
+        const synced = await syncDiscoveredPeople({
+          userId: options.userId,
+          companyId: lead.companyId,
+          people,
+        });
+        peopleSummary = { found: people.length, phones, ...synced };
+        const parts = [
+          synced.created.length &&
+            `${synced.created.length} contact${synced.created.length === 1 ? "" : "s"} added`,
+          synced.enriched.length &&
+            `${synced.enriched.length} gained an email`,
+          synced.matched && `${synced.matched} already known`,
+        ].filter(Boolean);
+        await progress.done(
+          "people",
+          "contacts",
+          parts.length ? parts.join(" · ") : "Nothing new — everyone was already recorded",
+          synced.created.map((c) => c.email ?? c.name).join(" · ") || undefined,
+        );
+      } else {
+        await progress.warn(
+          "people",
+          "contacts",
+          "No people or addresses appeared in the sources",
+        );
+      }
+    } catch (error) {
+      // People sync failing must not throw away a good research report.
+      warnings.push(`People discovery failed: ${messageOf(error)}`);
+      await progress.fail("people", "contacts", "People discovery failed", messageOf(error));
+    }
 
     /* ------------------------------------ 5. write the payload, then score it */
     const payload: ResearchPayload = {
@@ -234,6 +374,7 @@ export async function runResearch(options: RunResearchOptions): Promise<RunResea
       signals,
       technologies: report.technology_signals,
       opportunities: [],
+      people: peopleSummary,
       report,
       sources: sources.map((s) => ({
         id: s.id,
@@ -263,10 +404,12 @@ export async function runResearch(options: RunResearchOptions): Promise<RunResea
       userId: options.userId,
       actorType: options.actorType ?? "SYSTEM",
     });
+    await progress.done("company", "scoring", "Recomputed the lead score");
 
     /* ------------------------------------- 6. opportunity generation (§11) */
     let opportunities: Opportunity[] = [];
     try {
+      await progress.start("company", "opportunities", "Drafting opportunities from the evidence");
       const generated = await aiService().run({
         agent: "opportunity",
         userId: options.userId,
@@ -298,9 +441,16 @@ export async function runResearch(options: RunResearchOptions): Promise<RunResea
       ).opportunities;
 
       await persistOpportunities(lead.id, lead.companyId, opportunities);
+      await progress.done(
+        "company",
+        "opportunities",
+        `Proposed ${opportunities.length} opportunit${opportunities.length === 1 ? "y" : "ies"}`,
+        opportunities.map((o) => o.title).slice(0, 4).join(" · ") || undefined,
+      );
     } catch (error) {
       // An opportunity failure must not throw away a good research report.
       warnings.push(`Opportunity generation failed: ${messageOf(error)}`);
+      await progress.fail("company", "opportunities", "Opportunity generation failed", messageOf(error));
     }
 
     /* ------------------------------------------------------- 7. mark complete */
@@ -346,6 +496,7 @@ export async function runResearch(options: RunResearchOptions): Promise<RunResea
     };
   } catch (error) {
     const message = messageOf(error);
+    await progress.fail("company", "run", "Research run failed", message.slice(0, 500));
     await prisma.researchReport
       .update({
         where: { id: reportId },
@@ -376,84 +527,6 @@ export async function runResearch(options: RunResearchOptions): Promise<RunResea
     };
   }
 }
-
-/* ---------------------------------------------------------------- sources */
-
-type FetchedPage = { kind: string; url: string; title: string; text: string };
-
-async function gatherSources(
-  company: { name: string; domain: string | null; website: string | null },
-  warnings: string[],
-): Promise<FetchedPage[]> {
-  const provider = getSearchProvider();
-  const pages: FetchedPage[] = [];
-  const seen = new Set<string>();
-
-  const base = baseUrl(company.website, company.domain);
-  const candidates: { kind: string; url: string }[] = [];
-
-  if (base) {
-    const paths = provider.name === "mock" ? SAMPLE_PATHS : SITE_PATHS;
-    for (const path of paths) {
-      candidates.push({ kind: kindForPath(path), url: new URL(path, base).toString() });
-    }
-  } else {
-    warnings.push("No website or domain recorded, so the company site could not be read.");
-  }
-
-  // Search results supplement the company's own site (job boards, news).
-  try {
-    const query = base ? `${company.name} ${new URL(base).hostname}` : company.name;
-    const results = await provider.search(query, 5);
-    for (const result of results) {
-      candidates.push({ kind: kindForPath(result.url), url: result.url });
-    }
-  } catch (error) {
-    warnings.push(`Search failed: ${messageOf(error)}`);
-  }
-
-  for (const candidate of candidates) {
-    if (pages.length >= MAX_SOURCES) break;
-    const key = candidate.url.replace(/\/$/, "");
-    if (seen.has(key)) continue;
-    seen.add(key);
-
-    try {
-      const page = await provider.fetchPage(candidate.url);
-      if (!page?.text?.trim()) continue;
-      pages.push({
-        kind: candidate.kind,
-        url: candidate.url,
-        title: page.title || candidate.url,
-        text: page.text,
-      });
-    } catch (error) {
-      warnings.push(`Could not read ${candidate.url}: ${messageOf(error)}`);
-    }
-  }
-
-  return pages;
-}
-
-function baseUrl(website: string | null, domain: string | null) {
-  const raw = website?.trim() || (domain?.trim() ? `https://${domain.trim()}` : null);
-  if (!raw) return null;
-  try {
-    return new URL(raw.startsWith("http") ? raw : `https://${raw}`).origin;
-  } catch {
-    return null;
-  }
-}
-
-function kindForPath(value: string) {
-  if (/career|job|vacanc|hiring/i.test(value)) return "JOB_POSTING";
-  if (/news|blog|press/i.test(value)) return "NEWS";
-  if (/about|team|company/i.test(value)) return "ABOUT";
-  if (/service|product|solution/i.test(value)) return "SERVICES";
-  return "WEBSITE";
-}
-
-/* ----------------------------------------------------------------- writes */
 
 async function persistOpportunities(
   leadId: string,

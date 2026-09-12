@@ -10,6 +10,7 @@ import {
 } from "h3";
 import { ZodError, type ZodType } from "zod";
 import { UnauthorizedError, requireUser, type SessionUser } from "./auth";
+import { AiRunError } from "./ai/service";
 
 /**
  * Ported from the Next app's `src/lib/api.ts`.
@@ -95,6 +96,10 @@ export function toErrorResponse(error: unknown): ApiResponse {
   if (error instanceof ZodError)
     return fail("Validation failed", 422, error.issues);
   if (error instanceof HttpError) return fail(error.message, error.status);
+  // A failed model call is an upstream fault the operator can act on (retry,
+  // switch provider), so the message survives instead of a blank 500. The
+  // AIService has already stripped it down to a one-line description.
+  if (error instanceof AiRunError) return fail(error.message, 502);
   console.error("[api]", error);
   return fail("Internal server error", 500);
 }

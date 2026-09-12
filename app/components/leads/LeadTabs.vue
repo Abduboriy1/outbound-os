@@ -13,7 +13,8 @@ const TABS = [
   { segment: "people", label: "People" },
   { segment: "opportunities", label: "Opportunities" },
   { segment: "activity", label: "Activity" },
-  { segment: "emails", label: "Emails" },
+  // Outreach activity (drafts, threads) — discovered emails live on People.
+  { segment: "emails", label: "Outreach" },
   { segment: "meetings", label: "Meetings" },
   { segment: "tasks", label: "Tasks" },
   { segment: "proposal", label: "Proposal" },

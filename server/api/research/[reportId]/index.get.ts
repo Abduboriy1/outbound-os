@@ -1,5 +1,6 @@
 import { notFound, ok, route } from "~~/server/lib/api";
 import { prisma } from "~~/server/lib/db";
+import { readResearchProgress } from "~~/server/lib/research/progress";
 import { readResearchPayload } from "~~/server/lib/research/types";
 
 /** Full report: claims grouped by type, with their sources (plan §9). */
@@ -14,7 +15,7 @@ export default route(async (_event, { user, params }) => {
   });
   if (!report) notFound("Research report");
 
-  const { payload: rawPayload, ...rest } = report;
+  const { payload: rawPayload, progress: rawProgress, ...rest } = report;
   const payload = readResearchPayload(rawPayload);
 
   return ok({
@@ -27,5 +28,8 @@ export default route(async (_event, { user, params }) => {
     signals: payload?.signals ?? [],
     opportunities: payload?.opportunities ?? [],
     warnings: payload?.warnings ?? [],
+    // The run's live step log; after completion it reads as the run's history.
+    progress: readResearchProgress(rawProgress),
+    people: payload?.people ?? null,
   });
 });

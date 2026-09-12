@@ -29,6 +29,7 @@ const props = withDefaults(
           props.tone === 'positive' && 'text-positive',
           props.tone === 'danger' && 'text-danger',
           props.tone === 'warning' && 'text-warning',
+          props.tone === 'accent' && 'text-accent',
         )
       "
     >

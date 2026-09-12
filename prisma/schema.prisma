@@ -409,6 +409,9 @@ model ResearchReport {
   /// Structured agent output (plan §31) — never rely on raw text alone.
   summary        String?
   payload        Json?
+  /// Append-only step log written while the run executes, so the UI can show
+  /// what the agent is doing live and replay it afterwards as history.
+  progress       Json?
   confidence     Float?
   model          String?
   error          String?
@@ -1000,6 +1003,32 @@ model IntegrationCredential {
 
   @@index([integrationId])
   @@map("integration_credentials")
+}
+
+/// One row per outbound third-party request (AI providers, search vendors,
+/// page fetches) so upstream failures — Gemini 404/429/503, rejected search
+/// keys — are inspectable after the fact. Rows are pruned on a retention
+/// window; `meta` carries small sanitised details (model, query), never keys.
+model DebugLog {
+  id         String   @id @default(cuid())
+  /// "gemini" | "anthropic" | "brave" | "serper" | "fetch"
+  provider   String
+  /// e.g. "generateContent" | "searchGrounded" | "search" | "fetchPage"
+  operation  String
+  url        String?
+  /// HTTP status when known (SDK errors expose it; success is 200).
+  status     Int?
+  ok         Boolean
+  durationMs Int
+  /// 1-based attempt number within one logical call (retries log again).
+  attempt    Int      @default(1)
+  error      String?
+  meta       Json?
+  createdAt  DateTime @default(now())
+
+  @@index([provider, createdAt])
+  @@index([ok, createdAt])
+  @@map("debug_logs")
 }
 
 model AuditLog {

@@ -13,10 +13,14 @@
  * version was a server component querying Prisma; this reads
  * `GET /api/research/:reportId`, resolving `leadId` to the newest report first.
  */
-import { computed } from "vue";
+import { computed, onScopeDispose, ref, watch } from "vue";
 import type { ClaimType } from "~~/server/generated/prisma/client";
 import type { Tone } from "~~/shared/tone";
+import { rerunResearchAction, startResearchAction } from "./actions";
+import ResearchActivity from "./ResearchActivity.vue";
+import { RESEARCH_STATUS_HINTS, statusTone } from "./status";
 import UiBadge from "~/components/ui/UiBadge.vue";
+import UiButton from "~/components/ui/UiButton.vue";
 import UiCard from "~/components/ui/UiCard.vue";
 import UiCardBody from "~/components/ui/UiCardBody.vue";
 import UiCardHeader from "~/components/ui/UiCardHeader.vue";
@@ -38,6 +42,10 @@ const props = withDefaults(
   { reportId: undefined, leadId: undefined, compact: false },
 );
 
+/** Fired after a run is started and whenever an open run settles, so a parent
+ *  showing a run list (the history rail) can refresh its rows. */
+const emit = defineEmits<{ updated: [] }>();
+
 const CLAIM_TYPES: ClaimType[] = ["FACT", "INFERENCE", "UNKNOWN"];
 
 const CLAIM_TONES: Record<ClaimType, Tone> = {
@@ -52,13 +60,6 @@ const CLAIM_BLURB: Record<ClaimType, string> = {
   UNKNOWN: "Not answered by the sources. Worth asking on a call.",
 };
 
-const STATUS_TONES: Record<string, Tone> = {
-  PENDING: "neutral",
-  RUNNING: "accent",
-  COMPLETE: "positive",
-  FAILED: "danger",
-};
-
 /**
  * Two chained requests, so this is `useAsyncData` rather than `useFetch` — but
  * it must issue them with `useRequestFetch()`, not bare `$fetch`. `$fetch`
@@ -69,7 +70,7 @@ const STATUS_TONES: Record<string, Tone> = {
  */
 const request = useRequestFetch();
 
-const { data: report } = await useAsyncData<ResearchReportDetail | null>(
+const { data: report, refresh } = await useAsyncData<ResearchReportDetail | null>(
   `research-report:${props.reportId ?? ""}:${props.leadId ?? ""}`,
   async () => {
     let id = props.reportId;
@@ -88,6 +89,67 @@ const { data: report } = await useAsyncData<ResearchReportDetail | null>(
   },
   { default: () => null },
 );
+
+/**
+ * Starting a run is the one thing this view writes. `POST /api/research`
+ * answers as soon as the PENDING row exists, so the report only becomes
+ * interesting a few seconds later — hence the poll below rather than a single
+ * refresh. Without this button a lead with no report had no way to get one:
+ * the research queue can only re-run reports that already exist.
+ */
+const running = ref(false);
+const runError = ref<string | null>(null);
+
+const inFlight = computed(
+  () => report.value?.status === "PENDING" || report.value?.status === "RUNNING",
+);
+
+async function run() {
+  if (running.value) return;
+  running.value = true;
+  runError.value = null;
+  try {
+    const result = report.value
+      ? await rerunResearchAction(report.value.id)
+      : props.leadId
+        ? await startResearchAction(props.leadId)
+        : { error: "No lead to research" };
+    if (result.error) runError.value = result.error;
+    await refresh();
+    emit("updated");
+  } finally {
+    running.value = false;
+  }
+}
+
+/**
+ * Polls only while a run is open, and only on the client — the queue worker
+ * writes the report from another process, so nothing else would tell this view
+ * the run had finished.
+ */
+let timer: ReturnType<typeof setInterval> | null = null;
+
+function stopPolling() {
+  if (timer) clearInterval(timer);
+  timer = null;
+}
+
+if (import.meta.client) {
+  watch(
+    inFlight,
+    (open, was) => {
+      if (!open) {
+        stopPolling();
+        if (was) emit("updated"); // the run just settled
+        return;
+      }
+      if (timer) return;
+      timer = setInterval(() => void refresh(), 3000);
+    },
+    { immediate: true },
+  );
+  onScopeDispose(stopPolling);
+}
 
 const sourceById = computed(() => {
   const map = new Map<string, ResearchSource>();
@@ -124,7 +186,16 @@ function claimSource(claim: ResearchClaim) {
     v-if="!report"
     title="No research yet"
     description="Run research on this lead to build a sourced company intelligence report."
-  />
+  >
+    <template #action>
+      <div v-if="leadId" class="flex flex-col items-center gap-2">
+        <UiButton variant="primary" size="sm" :disabled="running" @click="run">
+          {{ running ? "Starting…" : "Run research" }}
+        </UiButton>
+        <p v-if="runError" class="text-xs text-danger">{{ runError }}</p>
+      </div>
+    </template>
+  </UiEmptyState>
 
   <div v-else class="space-y-4">
     <UiCard>
@@ -137,13 +208,20 @@ function claimSource(claim: ResearchClaim) {
             <UiBadge v-if="report.confidence != null" tone="neutral">
               Confidence {{ Math.round(report.confidence * 100) }}%
             </UiBadge>
-            <UiBadge :tone="STATUS_TONES[report.status] ?? 'neutral'">
+            <UiBadge
+              :tone="statusTone(report.status)"
+              :title="RESEARCH_STATUS_HINTS[report.status]"
+            >
               {{ report.status }}
             </UiBadge>
+            <UiButton size="sm" :disabled="running || inFlight" @click="run">
+              {{ inFlight ? "Running…" : "Re-run" }}
+            </UiButton>
           </div>
         </template>
       </UiCardHeader>
       <UiCardBody class="space-y-3">
+        <p v-if="runError" class="text-sm text-danger">{{ runError }}</p>
         <p
           v-if="report.error"
           class="rounded-md bg-danger-soft px-3 py-2 text-sm text-danger"
@@ -156,6 +234,82 @@ function claimSource(claim: ResearchClaim) {
         <p v-else class="text-sm text-muted">No summary was produced.</p>
         <ul v-if="report.warnings.length" class="space-y-1 text-xs text-warning">
           <li v-for="warning in report.warnings" :key="warning">{{ warning }}</li>
+        </ul>
+      </UiCardBody>
+    </UiCard>
+
+    <!-- What the agent did, live while it runs, history afterwards. -->
+    <ResearchActivity
+      v-if="report.progress.length || inFlight"
+      :events="report.progress"
+      :live="inFlight"
+    />
+
+    <UiCard
+      v-if="
+        report.people &&
+        (report.people.created.length ||
+          report.people.enriched.length ||
+          report.people.phones?.length)
+      "
+    >
+      <UiCardHeader
+        title="People added to this lead"
+        description="Found in the sources and saved straight to the People tab."
+      >
+        <template #action>
+          <NuxtLink :to="`/leads/${report.leadId}/people`">
+            <UiButton size="sm" variant="ghost">Open People</UiButton>
+          </NuxtLink>
+        </template>
+      </UiCardHeader>
+      <UiCardBody>
+        <ul class="space-y-2">
+          <li
+            v-for="person in report.people.created"
+            :key="person.id"
+            class="flex flex-wrap items-center gap-2 text-sm"
+          >
+            <UiBadge tone="positive">new</UiBadge>
+            <NuxtLink
+              :to="`/people/${person.id}`"
+              class="font-medium underline-offset-2 hover:underline"
+            >
+              {{ person.name }}
+            </NuxtLink>
+            <span v-if="person.email" class="text-xs text-muted">{{ person.email }}</span>
+          </li>
+          <li
+            v-for="person in report.people.enriched"
+            :key="person.id"
+            class="flex flex-wrap items-center gap-2 text-sm"
+          >
+            <UiBadge tone="accent">email found</UiBadge>
+            <NuxtLink
+              :to="`/people/${person.id}`"
+              class="font-medium underline-offset-2 hover:underline"
+            >
+              {{ person.name }}
+            </NuxtLink>
+            <span class="text-xs text-muted">{{ person.email }}</span>
+          </li>
+          <li
+            v-for="phone in report.people.phones ?? []"
+            :key="phone.number"
+            class="flex flex-wrap items-center gap-2 text-sm"
+          >
+            <UiBadge tone="neutral">{{ phone.kind }}</UiBadge>
+            <span class="tabular-nums">{{ phone.number }}</span>
+            <a
+              v-if="phone.sourceUrl"
+              :href="phone.sourceUrl"
+              target="_blank"
+              rel="noreferrer noopener"
+              class="text-xs text-accent underline-offset-2 hover:underline"
+            >
+              source
+            </a>
+          </li>
         </ul>
       </UiCardBody>
     </UiCard>

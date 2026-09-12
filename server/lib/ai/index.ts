@@ -5,6 +5,7 @@ export type { AiRunResult, RunOptions } from "./service";
 export { getAiProvider, resetAiProvider } from "./provider";
 export { MockAiProvider, registerMockAgent } from "./providers/mock";
 export { AnthropicAiProvider } from "./providers/anthropic";
+export { GeminiAiProvider } from "./providers/gemini";
 export {
   wrapUntrusted,
   stripInjection,

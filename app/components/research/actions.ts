@@ -102,6 +102,26 @@ export async function makeDefaultIcpAction(
 
 /* ------------------------------------------------------------- queue */
 
+/**
+ * Starts the first research run for a lead. `POST /api/research` creates the
+ * PENDING report and enqueues the job, so this returns as soon as the row
+ * exists — the caller polls the report for the rest.
+ */
+export async function startResearchAction(
+  leadId: string,
+): Promise<IcpFormState & { reportId?: string }> {
+  if (!leadId) return {};
+  try {
+    const result = await $fetch<{ data: { reportId: string } }>("/api/research", {
+      method: "POST",
+      body: { leadId },
+    });
+    return { reportId: result.data.reportId };
+  } catch (error) {
+    return { error: message(error, "Could not start research for this lead") };
+  }
+}
+
 /** Re-runs an existing report in place (plan §32: research is re-runnable). */
 export async function rerunResearchAction(
   reportId: string,

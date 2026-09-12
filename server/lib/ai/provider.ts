@@ -2,6 +2,7 @@ import type { AiProvider } from "~~/server/lib/contracts";
 import { env } from "~~/server/lib/env";
 import { MockAiProvider } from "./providers/mock";
 import { AnthropicAiProvider } from "./providers/anthropic";
+import { GeminiAiProvider } from "./providers/gemini";
 // Side-effect import: registers the hand-written mock generators. Without it
 // those agents fall back to the schema synthesiser, which emits field-shaped
 // filler rather than anything a person would recognise as reply analysis.
@@ -15,7 +16,16 @@ let cached: AiProvider | null = null;
  */
 export function getAiProvider(): AiProvider {
   if (cached) return cached;
-  cached = env().AI_PROVIDER === "anthropic" ? new AnthropicAiProvider() : new MockAiProvider();
+  switch (env().AI_PROVIDER) {
+    case "anthropic":
+      cached = new AnthropicAiProvider();
+      break;
+    case "gemini":
+      cached = new GeminiAiProvider();
+      break;
+    default:
+      cached = new MockAiProvider();
+  }
   return cached;
 }
 

@@ -188,11 +188,26 @@ export async function createWorkers(concurrency = 2): Promise<WorkerHandle | nul
   const redis = await getRedis();
   if (!redis) return null;
 
+  // The probe connection above fails fast on purpose (2s timeout, gives up
+  // after 3 retries) so the web app can fall back to inline jobs. BullMQ
+  // duplicates whatever connection a Worker is given, and a duplicate that
+  // inherits those settings dies for good the first time a connect is slow
+  // (e.g. while the dev server is building). Workers are long-lived, so they
+  // get their own connection that waits longer and never stops retrying.
+  const workerConnection = new IORedis(env().REDIS_URL, {
+    maxRetriesPerRequest: null,
+    connectTimeout: 10_000,
+    retryStrategy: (attempts) => Math.min(attempts * 500, 5_000),
+  });
+  workerConnection.on("error", (error) =>
+    console.warn(`[worker] Redis connection error (will retry): ${messageOf(error)}`),
+  );
+
   const workers = JOB_NAMES.map((name) => {
     const worker = new Worker(
       name,
       async (job: Job) => runJob(name, job.data as JobPayloads[JobName]),
-      { connection: redis, prefix: QUEUE_PREFIX, concurrency },
+      { connection: workerConnection, prefix: QUEUE_PREFIX, concurrency },
     );
     worker.on("failed", (job, error) =>
       console.error(`[worker:${name}] job ${job?.id} failed:`, messageOf(error)),
@@ -205,6 +220,7 @@ export async function createWorkers(concurrency = 2): Promise<WorkerHandle | nul
     workers,
     close: async () => {
       await Promise.all(workers.map((worker) => worker.close()));
+      await workerConnection.quit().catch(() => {});
     },
   };
 }

@@ -57,6 +57,8 @@ export default route(async (event, { user }) => {
       return {
         ...rest,
         signals: payload?.signals.length ?? 0,
+        people:
+          (payload?.people?.created.length ?? 0) + (payload?.people?.enriched.length ?? 0),
         // The research queue's per-lead progress row (plan §32) counts the
         // opportunities the run produced; `src/app/(app)/research/queue/page.tsx`
         // read it off the payload the same way.

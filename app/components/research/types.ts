@@ -111,8 +111,29 @@ export type ResearchListRow = {
   _count: { claims: number; sources: number };
   signals: number;
   opportunities: number;
+  /** Contacts the run created or enriched — the People tab's gain. */
+  people: number;
   warnings: string[];
   signalDetails?: DetectedSignal[];
+};
+
+/** One step of a run's live log (`ResearchReport.progress`). */
+export type ResearchProgressEvent = {
+  at: string;
+  section: "company" | "people";
+  stage: string;
+  status: "started" | "done" | "warning" | "failed";
+  label: string;
+  detail?: string;
+};
+
+/** What people discovery wrote to the People tab. */
+export type ResearchPeopleSummary = {
+  found: number;
+  created: { id: string; name: string; email: string | null }[];
+  enriched: { id: string; name: string; email: string }[];
+  matched?: number;
+  phones?: { number: string; kind: "phone" | "fax"; sourceUrl: string | null }[];
 };
 
 export type ResearchClaim = {
@@ -158,6 +179,8 @@ export type ResearchReportDetail = {
   signals: DetectedSignal[];
   opportunities: unknown[];
   warnings: string[];
+  progress: ResearchProgressEvent[];
+  people: ResearchPeopleSummary | null;
 };
 
 /** BullMQ health, as the research queue page shows it. */

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { assertPublicUrl, isBlockedHostname, isPrivateAddress } from "./http";
+import {
+  assertPublicUrl,
+  isBlockedHostname,
+  isPrivateAddress,
+  parseBrave,
+  parseSerper,
+} from "./http";
 
 /**
  * SSRF guard. These run offline: `assertPublicUrl` only resolves DNS for
@@ -79,5 +85,66 @@ describe("assertPublicUrl", () => {
   it("accepts a public literal address", async () => {
     const url = await assertPublicUrl("https://93.184.216.34/careers");
     expect(url.pathname).toBe("/careers");
+  });
+});
+
+/**
+ * Vendor response parsing. Both shapes are hand-written from the vendors' own
+ * documented responses, so the fixtures below are what the parsers must cope
+ * with — including entries with no URL, which must be dropped rather than
+ * turned into a source with an empty link.
+ */
+describe("parseBrave", () => {
+  it("maps web results and strips the query-term markup", () => {
+    expect(
+      parseBrave({
+        web: {
+          results: [
+            {
+              title: "Leeds hauliers",
+              url: "https://directory.example/leeds",
+              description: "A list of <strong>hauliers</strong> in Leeds.",
+            },
+            { title: "No link", description: "dropped" },
+          ],
+        },
+      }),
+    ).toEqual([
+      {
+        title: "Leeds hauliers",
+        url: "https://directory.example/leeds",
+        snippet: "A list of hauliers in Leeds.",
+        source: "brave",
+      },
+    ]);
+  });
+
+  it("returns nothing for an unexpected payload", () => {
+    expect(parseBrave({})).toEqual([]);
+    expect(parseBrave(null)).toEqual([]);
+  });
+});
+
+describe("parseSerper", () => {
+  it("maps organic results", () => {
+    expect(
+      parseSerper({
+        organic: [
+          { title: "Leeds hauliers", link: "https://directory.example/leeds", snippet: "A list." },
+          { title: "No link" },
+        ],
+      }),
+    ).toEqual([
+      {
+        title: "Leeds hauliers",
+        url: "https://directory.example/leeds",
+        snippet: "A list.",
+        source: "serper",
+      },
+    ]);
+  });
+
+  it("returns nothing for an unexpected payload", () => {
+    expect(parseSerper({ organic: null })).toEqual([]);
   });
 });

@@ -21,6 +21,15 @@ export type ResearchPayload = {
   signals: DetectedSignal[];
   technologies: string[];
   opportunities: Opportunity[];
+  /** What people discovery did to the People tab (created / enriched contacts). */
+  people?: {
+    found: number;
+    created: { id: string; name: string; email: string | null }[];
+    enriched: { id: string; name: string; email: string }[];
+    matched?: number;
+    /** Phone and fax numbers seen on the pages, with where they were seen. */
+    phones?: { number: string; kind: "phone" | "fax"; sourceUrl: string | null }[];
+  };
   report: ResearchOutput | null;
   sources: { id: string; kind: string; url: string | null; title: string | null }[];
   provider: string;
@@ -49,6 +58,33 @@ const payloadSchema = z.object({
   signals: z.array(signalSchema).default([]),
   technologies: z.array(z.string()).default([]),
   opportunities: z.array(z.looseObject({})).default([]),
+  people: z
+    .object({
+      found: z.number().default(0),
+      created: z
+        .array(
+          z.object({
+            id: z.string(),
+            name: z.string(),
+            email: z.string().nullable().default(null),
+          }),
+        )
+        .default([]),
+      enriched: z
+        .array(z.object({ id: z.string(), name: z.string(), email: z.string() }))
+        .default([]),
+      matched: z.number().optional(),
+      phones: z
+        .array(
+          z.object({
+            number: z.string(),
+            kind: z.enum(["phone", "fax"]).default("phone"),
+            sourceUrl: z.string().nullable().default(null),
+          }),
+        )
+        .optional(),
+    })
+    .optional(),
   report: z.unknown().nullable().default(null),
   sources: z
     .array(

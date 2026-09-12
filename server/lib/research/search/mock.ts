@@ -11,7 +11,11 @@
  * the same pages — demos and tests stay stable.
  */
 
-import type { SearchProvider, SearchResult } from "~~/server/lib/contracts";
+import type {
+  FetchedPageContent,
+  SearchProvider,
+  SearchResult,
+} from "~~/server/lib/contracts";
 
 export const SAMPLE_BANNER =
   "[SAMPLE DATA] Generated locally by the mock search provider. This text was not retrieved from the internet. Configure SEARCH_PROVIDER=http to fetch real pages.";
@@ -66,7 +70,7 @@ export class MockSearchProvider implements SearchProvider {
     });
   }
 
-  async fetchPage(url: string): Promise<{ title: string; text: string } | null> {
+  async fetchPage(url: string): Promise<FetchedPageContent | null> {
     let parsed: URL;
     try {
       parsed = new URL(url);
@@ -79,6 +83,17 @@ export class MockSearchProvider implements SearchProvider {
     return {
       title: `${company} — ${titleFor(kind)} (sample data)`,
       text: `${SAMPLE_BANNER}\n\n${body(kind, parsed.hostname)}`,
+      // The homepage links to the other sample pages, like real site nav, so
+      // the crawler's link-following path is exercised in mock mode too.
+      links:
+        kind === "homepage"
+          ? Object.entries(PATHS)
+              .filter(([k]) => k !== "homepage")
+              .map(([k, path]) => ({
+                url: `https://${parsed.hostname}${path}`,
+                label: titleFor(k as PageKind),
+              }))
+          : [],
     };
   }
 }

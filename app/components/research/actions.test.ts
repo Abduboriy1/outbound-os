@@ -4,6 +4,7 @@ import {
   deleteIcpAction,
   makeDefaultIcpAction,
   rerunResearchAction,
+  startResearchAction,
   updateIcpAction,
 } from "./actions";
 import { EMPTY_ICP } from "./icp";
@@ -153,5 +154,32 @@ describe("deleteIcpAction / rerunResearchAction", () => {
     expect(await rerunResearchAction("r1")).toEqual({
       error: "This report is already running",
     });
+  });
+});
+
+describe("startResearchAction", () => {
+  it("starts the first run for a lead and returns the report id", async () => {
+    fetchMock.mockResolvedValue({ data: { reportId: "r1", mode: "queued" } });
+
+    expect(await startResearchAction("lead-1")).toEqual({ reportId: "r1" });
+    expect(fetchMock).toHaveBeenCalledWith("/api/research", {
+      method: "POST",
+      body: { leadId: "lead-1" },
+    });
+  });
+
+  it("surfaces a failed inline run instead of looking like it worked", async () => {
+    fetchMock.mockRejectedValue({
+      data: { error: "Research failed: no AI provider configured" },
+    });
+
+    expect(await startResearchAction("lead-1")).toEqual({
+      error: "Research failed: no AI provider configured",
+    });
+  });
+
+  it("does nothing without a lead", async () => {
+    expect(await startResearchAction("")).toEqual({});
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

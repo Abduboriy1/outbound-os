@@ -10,7 +10,6 @@
  * `app/middleware/auth.global.ts` (MIGRATION.md §4.4).
  */
 import { computed } from "vue";
-import type { Tone } from "~~/shared/tone";
 import {
   rerunResearchAction,
   rescoreLeadAction,
@@ -19,17 +18,12 @@ import type {
   QueueStatus,
   ResearchListRow,
 } from "~/components/research/types";
+import {
+  RESEARCH_STATUS_HINTS,
+  RESEARCH_STATUS_ORDER as STATUS_ORDER,
+  statusTone,
+} from "~/components/research/status";
 import type { LeadListRow } from "~/components/outreach/types";
-
-const STATUS_TONES: Record<string, Tone> = {
-  PENDING: "neutral",
-  RUNNING: "accent",
-  COMPLETE: "positive",
-  FAILED: "danger",
-};
-
-/** Ordered so the things needing attention sit at the top. */
-const STATUS_ORDER = ["FAILED", "RUNNING", "PENDING", "COMPLETE"] as const;
 
 const { data: reports, refresh: refreshReports } = await useFetch("/api/research", {
   query: { limit: 100 },
@@ -72,6 +66,19 @@ const counts = computed(() => {
 
 const research = computed(() => queue.value?.counts.research ?? null);
 
+/**
+ * Redis up, jobs waiting, nothing active: the API enqueued successfully and no
+ * `npm run worker` process is consuming the queue, so every report sits at
+ * PENDING forever. The inline fallback only covers an unreachable Redis, which
+ * is why this cannot be inferred from the "queued / inline" badge alone.
+ */
+const workerIdle = computed(
+  () =>
+    Boolean(queue.value?.redis) &&
+    (research.value?.waiting ?? 0) > 0 &&
+    (research.value?.active ?? 0) === 0,
+);
+
 /** Per-lead progress through the pipeline stages of plan §32. */
 function steps(row: ResearchListRow) {
   return [
@@ -79,6 +86,7 @@ function steps(row: ResearchListRow) {
     { label: "claims", value: row._count.claims },
     { label: "signals", value: row.signals },
     { label: "opportunities", value: row.opportunities },
+    { label: "people", value: row.people },
   ];
 }
 
@@ -102,8 +110,12 @@ async function rescore(leadId: string) {
 
     <div class="mb-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
       <UiStatCard label="Complete" :value="counts.COMPLETE ?? 0" tone="positive" />
-      <UiStatCard label="Running" :value="counts.RUNNING ?? 0" />
-      <UiStatCard label="Pending" :value="counts.PENDING ?? 0" />
+      <UiStatCard label="Running" :value="counts.RUNNING ?? 0" tone="accent" />
+      <UiStatCard
+        label="Pending"
+        :value="counts.PENDING ?? 0"
+        :tone="counts.PENDING ? 'warning' : 'neutral'"
+      />
       <UiStatCard
         label="Failed"
         :value="counts.FAILED ?? 0"
@@ -121,14 +133,24 @@ async function rescore(leadId: string) {
         "
       >
         <template #action>
-          <UiBadge :tone="queue?.redis ? 'positive' : 'warning'">
-            {{ queue?.redis ? "queued" : "inline" }}
+          <UiBadge :tone="workerIdle ? 'danger' : queue?.redis ? 'positive' : 'warning'">
+            {{ workerIdle ? "no worker" : queue?.redis ? "queued" : "inline" }}
           </UiBadge>
         </template>
       </UiCardHeader>
-      <UiCardBody v-if="research" class="text-sm text-muted">
-        {{ research.waiting }} waiting · {{ research.active }} active ·
-        {{ research.failed }} failed
+      <UiCardBody class="space-y-2">
+        <p
+          v-if="workerIdle"
+          class="rounded-md bg-warning-soft px-3 py-2 text-sm text-warning"
+        >
+          {{ research?.waiting }} job{{ research?.waiting === 1 ? "" : "s" }} are waiting
+          and nothing is consuming them, so reports stay PENDING. Start the worker with
+          <code class="font-mono">npm run worker</code>.
+        </p>
+        <p v-if="research" class="text-sm text-muted">
+          {{ research.waiting }} waiting · {{ research.active }} active ·
+          {{ research.failed }} failed
+        </p>
       </UiCardBody>
     </UiCard>
 
@@ -171,7 +193,7 @@ async function rescore(leadId: string) {
               </p>
             </UiTd>
             <UiTd>
-              <UiBadge :tone="STATUS_TONES[row.status] ?? 'neutral'">
+              <UiBadge :tone="statusTone(row.status)" :title="RESEARCH_STATUS_HINTS[row.status]">
                 {{ row.status }}
               </UiBadge>
             </UiTd>

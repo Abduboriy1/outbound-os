@@ -14,7 +14,11 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { AiProvider, AiRequest, AiResponse } from "~~/server/lib/contracts";
 import { env } from "~~/server/lib/env";
+import { logApiCall } from "~~/server/lib/debug/apilog";
 import { renderUserContent } from "../prompt";
+import { parseJson, retryInstruction } from "./json";
+
+export { parseJson };
 
 const DEFAULT_MAX_TOKENS = 8_000;
 /** Non-streaming requests above this risk an SDK HTTP timeout. */
@@ -65,6 +69,7 @@ export class AnthropicAiProvider implements AiProvider {
     // One retry: the second attempt shows the model its own invalid output.
     for (let attempt = 0; attempt < 2; attempt += 1) {
       let message: Anthropic.Message;
+      const sentAt = Date.now();
       try {
         message = await this.client.messages.create({
           model: this.model,
@@ -78,8 +83,31 @@ export class AnthropicAiProvider implements AiProvider {
           },
         });
       } catch (error) {
+        logApiCall({
+          provider: this.name,
+          operation: `complete:${request.agent}`,
+          ok: false,
+          status: error instanceof Anthropic.APIError ? (error.status ?? null) : null,
+          durationMs: Date.now() - sentAt,
+          attempt: attempt + 1,
+          error: error instanceof Error ? error.message : String(error),
+          meta: { model: this.model },
+        });
         throw new AnthropicProviderError(describeSdkError(error), error);
       }
+      logApiCall({
+        provider: this.name,
+        operation: `complete:${request.agent}`,
+        ok: true,
+        status: 200,
+        durationMs: Date.now() - sentAt,
+        attempt: attempt + 1,
+        meta: {
+          model: message.model ?? this.model,
+          promptTokens: message.usage?.input_tokens,
+          completionTokens: message.usage?.output_tokens,
+        },
+      });
 
       promptTokens += message.usage?.input_tokens ?? 0;
       completionTokens += message.usage?.output_tokens ?? 0;
@@ -114,11 +142,9 @@ export class AnthropicAiProvider implements AiProvider {
         { role: "assistant", content: lastText || "(empty response)" },
         {
           role: "user",
-          content: [
-            `That reply could not be used: ${(lastError as Error)?.message ?? "unparseable output"}.`,
-            "Reply again with a single JSON object matching the requested schema.",
-            "No prose, no markdown fences, no trailing commentary.",
-          ].join(" "),
+          content: retryInstruction(
+            (lastError as Error)?.message ?? "unparseable output",
+          ),
         },
       );
     }
@@ -136,35 +162,6 @@ function textOf(message: Anthropic.Message) {
     .map((block) => block.text)
     .join("")
     .trim();
-}
-
-/**
- * Tolerates the two failure shapes seen in practice: a fenced code block, and
- * prose wrapped around the object. Anything else is a genuine failure.
- */
-export function parseJson(text: string): unknown {
-  if (!text) throw new Error("empty response");
-
-  const candidates = [text];
-
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fenced?.[1]) candidates.push(fenced[1].trim());
-
-  const firstBrace = text.indexOf("{");
-  const lastBrace = text.lastIndexOf("}");
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    candidates.push(text.slice(firstBrace, lastBrace + 1));
-  }
-
-  for (const candidate of candidates) {
-    try {
-      const parsed: unknown = JSON.parse(candidate);
-      if (parsed && typeof parsed === "object") return parsed;
-    } catch {
-      // try the next candidate
-    }
-  }
-  throw new Error("response was not valid JSON");
 }
 
 function describeSdkError(error: unknown) {

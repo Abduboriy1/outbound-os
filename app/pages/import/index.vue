@@ -3,8 +3,8 @@
  * Port of `src/app/(app)/import/page.tsx`.
  *
  * Plan §8 — lead discovery through pluggable sources. Manual entry and CSV are
- * the two that need no third-party account; search and directory providers plug
- * into the same LeadProvider interface later.
+ * the two that need no third-party account; the AI finder is the `search`
+ * source, and a directory provider plugs into the same interface later.
  *
  * The page was a server component reading `env().APP_URL`. Server env is not
  * readable from a page, and exposing it would mean a `runtimeConfig.public`
@@ -27,10 +27,16 @@ const sources = computed(() => [
     detail: "Add a referred company through the form above and set the source detail.",
   },
   {
-    name: "Search and directory providers",
+    name: "AI search",
+    status: "Active",
+    detail:
+      "The lead finder above searches the web against your ICP and offers only companies it can tie back to a page it read.",
+  },
+  {
+    name: "Directory providers",
     status: "Not configured",
     detail:
-      "Set SEARCH_PROVIDER to a real provider in the environment to enable automated discovery.",
+      "A directory or registry source plugs into the same LeadProvider interface as the finder.",
   },
 ]);
 </script>
@@ -43,6 +49,8 @@ const sources = computed(() => [
     />
 
     <div class="space-y-4">
+      <DashboardLeadFinder />
+
       <div class="grid gap-4 lg:grid-cols-2">
         <DashboardManualLeadForm />
         <DashboardCsvImport />

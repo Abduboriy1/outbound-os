@@ -13,7 +13,14 @@
 
 import type { ZodType } from "zod";
 import { ZodError } from "zod";
-import type { AgentName, AiProvider, AiResponse, UntrustedDocument } from "~~/server/lib/contracts";
+import type {
+  AgentName,
+  AiProvider,
+  AiResponse,
+  GroundedResponse,
+  GroundedSearchProvider,
+  UntrustedDocument,
+} from "~~/server/lib/contracts";
 import type { Prisma } from "~~/server/generated/prisma/client";
 import { prisma } from "~~/server/lib/db";
 import { audit } from "~~/server/lib/audit";
@@ -52,11 +59,124 @@ export type RunOptions<T> = {
   schema: ZodType<T>;
 };
 
+export type GroundedRunOptions = {
+  agent: AgentName;
+  userId: string;
+  system: string;
+  instruction: string;
+  maxTokens?: number;
+};
+
+export type GroundedRunResult = GroundedResponse & { runId: string };
+
+/** Thrown when the configured provider cannot search the live web. */
+export class GroundedSearchUnsupportedError extends Error {
+  constructor(providerName: string) {
+    super(
+      `The ${providerName} provider cannot search the web, so lead discovery is unavailable. ` +
+        "Set AI_PROVIDER=gemini, or leave it on mock to see the flow with sample companies.",
+    );
+    this.name = "GroundedSearchUnsupportedError";
+  }
+}
+
+function supportsGroundedSearch(
+  provider: AiProvider,
+): provider is AiProvider & GroundedSearchProvider {
+  return typeof (provider as Partial<GroundedSearchProvider>).searchGrounded === "function";
+}
+
 export class AIService {
   constructor(private readonly provider: AiProvider = getAiProvider()) {}
 
   get providerName() {
     return this.provider.name;
+  }
+
+  get canSearch() {
+    return supportsGroundedSearch(this.provider);
+  }
+
+  /**
+   * A grounded web search, recorded as an `AiRun` like any other model call.
+   *
+   * It returns prose and citations rather than validated output, because the
+   * providers that can search cannot also enforce a response schema in the same
+   * call. The caller structures the text with an ordinary `run()` afterwards,
+   * passing it as an untrusted document — which is what it is.
+   */
+  async runGrounded(options: GroundedRunOptions): Promise<GroundedRunResult> {
+    if (!supportsGroundedSearch(this.provider)) {
+      throw new GroundedSearchUnsupportedError(this.provider.name);
+    }
+
+    const run = await prisma.aiRun.create({
+      data: {
+        userId: options.userId,
+        agent: options.agent,
+        status: "RUNNING",
+        provider: this.provider.name,
+        model: this.provider.model,
+        input: {
+          system: options.system,
+          instruction: truncate(options.instruction, 20_000),
+          grounded: true,
+        },
+      },
+      select: { id: true },
+    });
+
+    let response: GroundedResponse;
+    try {
+      response = await this.provider.searchGrounded({
+        agent: options.agent,
+        system: options.system,
+        instruction: options.instruction,
+        maxTokens: options.maxTokens,
+      });
+    } catch (error) {
+      await this.failRun(run.id, options.agent, options.userId, messageOf(error));
+      throw new AiRunError(
+        `${options.agent} grounded search failed: ${messageOf(error)}`,
+        run.id,
+        error,
+      );
+    }
+
+    await prisma.aiRun.update({
+      where: { id: run.id },
+      data: {
+        status: "SUCCESS",
+        model: response.model,
+        provider: response.provider,
+        output: {
+          citations: response.citations,
+          queries: response.queries,
+        } as Prisma.InputJsonValue,
+        rawText: truncate(response.text, 40_000),
+        promptTokens: response.promptTokens ?? null,
+        completionTokens: response.completionTokens ?? null,
+        latencyMs: response.latencyMs,
+      },
+    });
+
+    await audit({
+      userId: options.userId,
+      actorType: "AI",
+      action: "ai.run",
+      entityType: "AiRun",
+      entityId: run.id,
+      metadata: {
+        agent: options.agent,
+        provider: response.provider,
+        model: response.model,
+        grounded: true,
+        citations: response.citations.length,
+        latencyMs: response.latencyMs,
+      },
+    });
+
+    return { ...response, runId: run.id };
   }
 
   async run<T>(options: RunOptions<T>): Promise<AiRunResult<T>> {
@@ -151,6 +271,27 @@ export class AIService {
       latencyMs: response.latencyMs,
       injectionFindings,
     };
+  }
+
+  /** Records a failure on a run that has no provider response to keep. */
+  private async failRun(runId: string, agent: AgentName, userId: string, message: string) {
+    await prisma.aiRun
+      .update({
+        where: { id: runId },
+        data: { status: "FAILED", error: truncate(message, 4_000) },
+      })
+      .catch((updateError) => {
+        console.error("[ai] could not record failed run", updateError);
+      });
+
+    await audit({
+      userId,
+      actorType: "AI",
+      action: "ai.run.failed",
+      entityType: "AiRun",
+      entityId: runId,
+      metadata: { agent, error: truncate(message, 500) },
+    });
   }
 
   private async fail<T>(

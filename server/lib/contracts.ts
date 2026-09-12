@@ -11,13 +11,15 @@
 
 export type AgentName =
   | "research"
+  | "searchplan"
   | "qualification"
   | "opportunity"
   | "outreach"
   | "reply"
   | "discovery"
   | "proposal"
-  | "salesCoach";
+  | "salesCoach"
+  | "prospecting";
 
 /**
  * A single model call. `system` carries the operator's instructions; `data`
@@ -57,6 +59,50 @@ export interface AiProvider {
   readonly name: string;
   readonly model: string;
   complete<T = unknown>(request: AiRequest): Promise<AiResponse<T>>;
+}
+
+/**
+ * An optional second capability: asking the model a question it must answer
+ * from a live web search, and getting back the sources it used (plan §8, lead
+ * discovery).
+ *
+ * It is deliberately not part of `AiProvider`. Only some providers can do it,
+ * and the reply is prose plus citations rather than structured output — the
+ * search tool and a response schema cannot be combined in one call — so a
+ * caller always follows this with a normal `complete()` to structure what came
+ * back. Keeping it separate means a provider that cannot search fails a
+ * feature, not the interface.
+ */
+export type GroundedRequest = {
+  agent: AgentName;
+  system: string;
+  instruction: string;
+  maxTokens?: number;
+};
+
+/** A source the provider actually consulted. */
+export type GroundedCitation = {
+  /** Often a provider redirect rather than the page itself — see `domain`. */
+  url: string;
+  title?: string;
+  /** The publisher's own hostname, where the provider reports one. */
+  domain?: string;
+};
+
+export type GroundedResponse = {
+  text: string;
+  citations: GroundedCitation[];
+  /** The searches the provider ran, when it reports them. */
+  queries: string[];
+  model: string;
+  provider: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  latencyMs: number;
+};
+
+export interface GroundedSearchProvider {
+  searchGrounded(request: GroundedRequest): Promise<GroundedResponse>;
 }
 
 /* --------------------------------------------------------------- email */
@@ -107,11 +153,23 @@ export type SearchResult = {
   source: string;
 };
 
+/** A link found on a fetched page, used by the crawler to follow Team /
+ *  Contact style navigation the way a human visitor would. */
+export type PageLink = { url: string; label: string };
+
+export type FetchedPageContent = {
+  title: string;
+  text: string;
+  /** Same-page anchors, absolute http(s) URLs. Optional: providers that
+   *  cannot supply them (plain text pages) simply omit the field. */
+  links?: PageLink[];
+};
+
 export interface SearchProvider {
   readonly name: string;
   search(query: string, limit?: number): Promise<SearchResult[]>;
   /** Fetches a page and returns readable text, or null if unavailable. */
-  fetchPage(url: string): Promise<{ title: string; text: string } | null>;
+  fetchPage(url: string): Promise<FetchedPageContent | null>;
 }
 
 /* ---------------------------------------------------------------- lead */
